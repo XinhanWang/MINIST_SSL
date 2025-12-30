@@ -3,7 +3,7 @@
 # Settings
 DATASETS=("MNIST" "FashionMNIST")
 COUNTS=(20 50 100)
-METHODS=("Supervised" "Consistency" "PseudoLabel") 
+METHODS=("Supervised" "Consistency" "PseudoLabel" "FreeMatch") 
 
 # 1. Run Baselines and Semi-Supervised
 for DATASET in "${DATASETS[@]}"; do

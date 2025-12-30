@@ -7,8 +7,8 @@ import os
 import json
 from tqdm import tqdm
 from dataset import get_dataloaders
-from models import SimpleCNN
-from utils import calculate_metrics, plot_confusion_matrix, visualize_features, construct_knn_graph, visualize_dataset_samples, visualize_augmentations
+from models import ResNet18
+from utils import calculate_metrics, plot_confusion_matrix, visualize_features,  visualize_dataset_samples, visualize_augmentations
 from itertools import cycle
 
 def train_supervised(model, loader, optimizer, criterion, device):
@@ -125,6 +125,77 @@ def train_consistency(model, labeled_loader, consistency_loader, optimizer, crit
         return 0.0
     return total_loss / batch_count
 
+def train_freematch(model, labeled_loader, unlabeled_loader, optimizer, criterion, device, context):
+    """
+    FreeMatch: Self-adaptive Thresholding.
+    context: dictionary to store EMA of probabilities (p_model) and global mean max probability (time_p).
+    """
+    if unlabeled_loader is None or len(unlabeled_loader) == 0:
+        return train_supervised(model, labeled_loader, optimizer, criterion, device)
+    if labeled_loader is None or len(labeled_loader) == 0:
+        return 0.0
+        
+    model.train()
+    iter_labeled = cycle(labeled_loader)
+    total_loss = 0.0
+    batch_count = 0
+    
+    # Initialize context if empty
+    if 'p_model' not in context:
+        # Assuming 10 classes for MNIST/FashionMNIST
+        context['p_model'] = torch.ones(10).to(device) / 10.0 
+        context['time_p'] = context['p_model'].mean() 
+
+    for data_u_w, data_u_s, _, _ in unlabeled_loader:
+        batch_count += 1
+        data_l, target_l, _ = next(iter_labeled)
+        
+        data_l, target_l = data_l.to(device), target_l.to(device)
+        data_u_w, data_u_s = data_u_w.to(device), data_u_s.to(device)
+        
+        optimizer.zero_grad()
+        
+        # 1. Supervised Loss
+        out_l = model(data_l)
+        loss_l = criterion(out_l, target_l)
+        
+        # 2. FreeMatch Loss
+        with torch.no_grad():
+            out_u_w = model(data_u_w)
+            probs_u_w = torch.softmax(out_u_w, dim=1)
+            max_probs, targets_u = torch.max(probs_u_w, dim=1)
+            
+            # Update EMA statistics
+            if batch_count == 1 and context['time_p'].item() == 0.1: # Initial state check
+                context['p_model'] = probs_u_w.mean(dim=0)
+                context['time_p'] = max_probs.mean()
+            else:
+                context['p_model'] = 0.999 * context['p_model'] + 0.001 * probs_u_w.mean(dim=0)
+                context['time_p'] = 0.999 * context['time_p'] + 0.001 * max_probs.mean()
+            
+            # Calculate Self-Adaptive Threshold
+            p_model = context['p_model']
+            max_p_model = p_model.max()
+            time_p = context['time_p']
+            
+            # Formula: tau_c = tau_global * (p_local(c) / max(p_local))
+            # Here tau_global is estimated by time_p
+            thresholds = time_p * (p_model / torch.max(max_p_model, torch.tensor(1e-6).to(device)))
+            
+            # Get threshold for each sample based on its predicted class
+            batch_thresholds = thresholds[targets_u]
+            mask = max_probs.ge(batch_thresholds).float()
+
+        out_u_s = model(data_u_s)
+        loss_u = (torch.nn.functional.cross_entropy(out_u_s, targets_u, reduction='none') * mask).mean()
+        
+        loss = loss_l + loss_u
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+        
+    return total_loss / batch_count
+
 def evaluate(model, loader, device, return_features=False):
     model.eval()
     all_preds = []
@@ -154,14 +225,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='MNIST', choices=['MNIST', 'FashionMNIST'])
     parser.add_argument('--method', type=str, default='Supervised', 
-                        choices=['Supervised', 'Consistency', 'LabelProp'])
+                        choices=['Supervised', 'Consistency', 'PseudoLabel', 'FreeMatch'])
     parser.add_argument('--n_labeled', type=int, default=20, help='Labels per class. -1 for full.')
     parser.add_argument('--unlabeled_mu', type=float, default=7.0, help='Ratio of unlabeled batch size to labeled batch size')
-    parser.add_argument('--epochs', type=int, default=20)
+    parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output_dir', type=str, default='./results')
+    # 新增：学习率调度器相关参数
+    parser.add_argument('--scheduler', type=str, default='cosine', choices=['none', 'cosine'], help='LR scheduler to use (default: cosine)')
+    parser.add_argument('--eta_min', type=float, default=1e-6, help='Minimum LR for cosine scheduler (eta_min)')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -188,13 +262,24 @@ def main():
         print("No semi-supervised unlabeled data; skipping augmentation visualization.")
 
     # Model
-    model = SimpleCNN().to(device)
-    # Use AdamW instead of SGD
+    model = ResNet18().to(device)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
+    # 使用余弦学习率衰减（CosineAnnealingLR），按 epoch 更新
+    if args.scheduler == 'cosine':
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.eta_min)
+    else:
+        scheduler = None
     criterion = nn.CrossEntropyLoss()
+
+    # Context for FreeMatch state
+    fm_context = {}
 
     # Standard Iterative Training
     for epoch in tqdm(range(args.epochs)):
+        # 在每个 epoch 开始打印当前学习率（便于监控）
+        # current_lr = optimizer.param_groups[0]['lr']
+        # print(f"Epoch {epoch+1}/{args.epochs} - LR: {current_lr:.6e}")
+
         if args.method == 'Supervised':
             train_supervised(model, labeled_loader, optimizer, criterion, device)
         elif args.method == 'PseudoLabel':
@@ -209,6 +294,15 @@ def main():
                 train_supervised(model, labeled_loader, optimizer, criterion, device)
             else:
                 train_consistency(model, labeled_loader, consistency_loader, optimizer, criterion, device)
+        elif args.method == 'FreeMatch':
+            if consistency_loader is None or len(consistency_loader) == 0:
+                train_supervised(model, labeled_loader, optimizer, criterion, device)
+            else:
+                train_freematch(model, labeled_loader, consistency_loader, optimizer, criterion, device, fm_context)
+
+        # 每个 epoch 结束后更新学习率（如果启用）
+        if scheduler is not None:
+            scheduler.step()
 
     # Final Evaluation on Test Set
     y_true, y_pred, features = evaluate(model, test_loader, device, return_features=True)

@@ -3,19 +3,24 @@ from torchvision import datasets, transforms
 from torch.utils.data import Dataset, DataLoader, Subset
 import numpy as np
 from collections import Counter
+from PIL import Image
 
 def get_dataset(name, root='./data'):
-    transform = transforms.Compose([
+    # We remove the initial transform for training data to keep them as PIL Images
+    # This allows us to apply RandAugment in SemiSupervisedDataset
+    
+    # For Test set, we apply the standard normalization immediately
+    test_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.5,), (0.5,))
     ])
     
     if name == 'MNIST':
-        train_dataset = datasets.MNIST(root, train=True, download=True, transform=transform)
-        test_dataset = datasets.MNIST(root, train=False, download=True, transform=transform)
+        train_dataset = datasets.MNIST(root, train=True, download=True, transform=None)
+        test_dataset = datasets.MNIST(root, train=False, download=True, transform=test_transform)
     elif name == 'FashionMNIST':
-        train_dataset = datasets.FashionMNIST(root, train=True, download=True, transform=transform)
-        test_dataset = datasets.FashionMNIST(root, train=False, download=True, transform=transform)
+        train_dataset = datasets.FashionMNIST(root, train=True, download=True, transform=None)
+        test_dataset = datasets.FashionMNIST(root, train=False, download=True, transform=test_transform)
     else:
         raise ValueError(f"Unknown dataset {name}")
         
@@ -43,29 +48,47 @@ class SemiSupervisedDataset(Dataset):
         self.indices = indices
         self.mode = mode
         
-        # For consistency regularization (weak/strong aug)
+        # Image size configuration
+        self.size = 28 
+        
+        # === 1. Weak Augmentation ===
         self.weak_transform = transforms.Compose([
-            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+            transforms.Resize(self.size),
+            transforms.RandomCrop(self.size, padding=4, padding_mode='reflect'),
+            transforms.RandomHorizontalFlip() if 'Fashion' in str(base_dataset) else transforms.Lambda(lambda x: x),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5,), (0.5,))
         ])
+        
+        # === 2. Strong Augmentation ===
         self.strong_transform = transforms.Compose([
-            transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), shear=10),
-            transforms.RandomErasing(p=0.5, scale=(0.02, 0.1)),
+            transforms.Resize(self.size),
+            transforms.RandomCrop(self.size, padding=4, padding_mode='reflect'),
+            transforms.RandomHorizontalFlip() if 'Fashion' in str(base_dataset) else transforms.Lambda(lambda x: x),
+            transforms.RandAugment(num_ops=2, magnitude=10),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5,), (0.5,)),
+            transforms.RandomErasing(p=0.5, scale=(0.02, 0.1)) 
         ])
 
     def __getitem__(self, index):
         real_index = self.indices[index]
         img, target = self.base_dataset[real_index]
         
+        # Ensure img is PIL Image for RandAugment
+        if isinstance(img, torch.Tensor):
+            img = transforms.ToPILImage()(img)
+        
         if self.mode == 'consistency':
             # Return weak and strong augmented versions
-            # Note: base_dataset returns tensor, we might need PIL for some transforms or apply on tensor
-            # Here we apply on tensor
             img_weak = self.weak_transform(img)
             img_strong = self.strong_transform(img)
             return img_weak, img_strong, target, real_index
-        
-        return img, target, real_index
-
+        else:
+            # Weak augmentation
+            img = self.weak_transform(img)
+            return img, target, real_index
+            
     def __len__(self):
         return len(self.indices)
 
