@@ -54,7 +54,7 @@ class SemiSupervisedDataset(Dataset):
         # === 1. Weak Augmentation ===
         self.weak_transform = transforms.Compose([
             transforms.Resize(self.size),
-            transforms.RandomCrop(self.size, padding=4, padding_mode='reflect'),
+            transforms.RandomCrop(self.size, padding=4),
             transforms.RandomHorizontalFlip() if 'Fashion' in str(base_dataset) else transforms.Lambda(lambda x: x),
             transforms.ToTensor(),
             transforms.Normalize((0.5,), (0.5,))
@@ -63,7 +63,7 @@ class SemiSupervisedDataset(Dataset):
         # === 2. Strong Augmentation ===
         self.strong_transform = transforms.Compose([
             transforms.Resize(self.size),
-            transforms.RandomCrop(self.size, padding=4, padding_mode='reflect'),
+            transforms.RandomCrop(self.size, padding=4),
             transforms.RandomHorizontalFlip() if 'Fashion' in str(base_dataset) else transforms.Lambda(lambda x: x),
             transforms.RandAugment(num_ops=2, magnitude=10),
             transforms.ToTensor(),
