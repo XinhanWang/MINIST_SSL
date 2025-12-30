@@ -8,7 +8,7 @@ import json
 from tqdm import tqdm
 from dataset import get_dataloaders
 from models import SimpleCNN
-from utils import calculate_metrics, plot_confusion_matrix, visualize_features, construct_knn_graph
+from utils import calculate_metrics, plot_confusion_matrix, visualize_features, construct_knn_graph, visualize_dataset_samples, visualize_augmentations
 from itertools import cycle
 
 def train_supervised(model, loader, optimizer, criterion, device):
@@ -175,6 +175,17 @@ def main():
     # Data
     labeled_loader, unlabeled_loader, consistency_loader, test_loader, train_base = \
         get_dataloaders(args.dataset, args.n_labeled, args.batch_size, args.unlabeled_mu)
+
+    # 可视化：每类一个样本
+    viz_dir = os.path.join(args.output_dir, args.dataset, args.method, f"labeled_{args.n_labeled}", "viz")
+    os.makedirs(viz_dir, exist_ok=True)
+    visualize_dataset_samples(train_base, os.path.join(viz_dir, "samples_per_class"), num_classes=10)
+
+    # 若为半监督（有 unlabeled），可视化弱/强增强（原图 / weak / strong）
+    if args.n_labeled != -1 and (consistency_loader is not None):
+        visualize_augmentations(train_base, consistency_loader, os.path.join(viz_dir, "augmentations"), num_examples=min(8, args.batch_size))
+    else:
+        print("No semi-supervised unlabeled data; skipping augmentation visualization.")
 
     # Model
     model = SimpleCNN().to(device)
