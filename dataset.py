@@ -79,7 +79,7 @@ class SemiSupervisedDataset(Dataset):
         if isinstance(img, torch.Tensor):
             img = transforms.ToPILImage()(img)
         
-        if self.mode == 'consistency':
+        if self.mode == 'consistency' or self.mode == 'FreeMatch':
             # Return weak and strong augmented versions
             img_weak = self.weak_transform(img)
             img_strong = self.strong_transform(img)
